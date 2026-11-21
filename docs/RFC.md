@@ -164,6 +164,7 @@ RFC детализирует следующие требования:
 - 95% push получают app acknowledgement за 3 секунды;
 - среди оставшихся 99% имеют валидный телефон;
 - SMS DLR success — 99,5%;
+- все оставшиеся пользователи имеют валидный email для упрощённой верхнеуровневой оценки;
 - SMS стоит 3 рубля;
 - email стоит 0,05 рубля.
 
@@ -176,8 +177,8 @@ Push delivered:            4 800 000 × 95% = 4 560 000
 SMS attempts:              1 440 000 × 99% = 1 425 600
 Ожидаемая стоимость SMS:   1 425 600 × 3 = 4 276 800 руб./день
 После SMS остаётся:        около 21 500
-Email attempts:            около 20 500
-Стоимость email:           около 1 025 руб./день
+Email attempts:            около 21 500
+Стоимость email:           около 1 075 руб./день
 ```
 
 Если отправлять все критичные сообщения сразу по SMS, стоимость была бы около 18 млн руб./день. Push-first экономит примерно 13,7 млн руб./день по принятым тарифам.
@@ -227,9 +228,9 @@ push → SMS → email
 
 Notification API в одной транзакции записывает `notifications` и `outbox`, после чего отвечает `202`. Debezium публикует Outbox в Kafka. Delivery Orchestrator потребляет событие, получает настройки и шаблон, строит план каналов и сохраняет состояние.
 
-Команды push, SMS и email публикуются в отдельные topics. Channel Workers имеют собственный inbox/dedup, вызывают провайдеров и публикуют результаты. Callback Gateway принимает асинхронные статусы и также пишет их в Kafka. Orchestrator обрабатывает результат или timeout и решает, завершить процесс либо начать следующий канал.
+Команды push, SMS и email публикуются в отдельные topics. Channel Workers транзакционно сохраняют inbox, результат попытки и Outbox, а Debezium публикует результаты. Callback Gateway проверяет подлинность асинхронных статусов и также сохраняет callback вместе с Outbox. Orchestrator обрабатывает результат или timeout и решает, завершить процесс либо начать следующий канал.
 
-`notification_id` используется как Kafka key, поэтому события одного уведомления попадают в одну партицию и сохраняют порядок.
+`notification_id` используется как Kafka key. Это сохраняет порядок событий одного уведомления внутри partition одного topic. Между разными topics глобального порядка нет, поэтому гонки callback, result и timeout разрешаются условными переходами по `state` и `version`.
 
 ### 8.2. Конкретные технологии
 
@@ -296,7 +297,9 @@ ACCEPTED
 
 ### 9.1. Архитектура
 
-Notification API проверяет idempotency key и запускает Temporal Workflow с `workflowId = notification_id`. Для повтора Temporal возвращает уже существующий workflow.
+Notification API создаёт или читает запись idempotency registry со статусом `PENDING` и запускает Temporal Workflow с `workflowId = notification_id`. Для повтора используется тот же ID: Temporal возвращает существующий workflow либо безопасно создаёт отсутствующий. После подтверждения запуска registry переводится в `STARTED`, и только тогда API отвечает `202`.
+
+Фоновый reconciler повторяет `StartWorkflow` для записей, которые остались в `PENDING`. Это закрывает сбой между commit registry и вызовом Temporal; повторный запуск безопасен благодаря фиксированному `workflowId`.
 
 Workflow вызывает Activities получения предпочтений, рендера шаблона и отправки по каналам. Durable timers ждут acknowledgement и запускают следующий канал. Provider callbacks преобразуются в Temporal Signals. Retry Policy задаётся отдельно для каждой Activity.
 
@@ -317,7 +320,7 @@ Temporal сохраняет историю workflow в своём PostgreSQL, п
 
 | ASR | Реализация |
 |---|---|
-| ASR-1 | durable workflow history, Activity retry, timers и terminal workflow result |
+| ASR-1 | registry `PENDING/STARTED` с reconciliation, durable workflow history, Activity retry, timers и terminal workflow result |
 | ASR-2 | отдельная critical task queue и worker pool |
 | ASR-3 | уникальный workflow ID и идемпотентные Activities |
 | ASR-4 | Retry Policy, Activity timeout, durable timer и переход к следующей Activity |
@@ -360,6 +363,8 @@ Temporal сохраняет историю workflow в своём PostgreSQL, п
 ## 11. Финальный выбор
 
 Выбран вариант A: Kafka + PostgreSQL + Delivery Orchestrator.
+
+Выбор сделан при допущении, что Kafka и PostgreSQL уже входят в поддерживаемый инфраструктурный стек банка. Это допущение должно быть подтверждено на Architecture Review; если Kafka придётся внедрять с нуля, инфраструктурную стоимость вариантов A и B нужно сравнить повторно.
 
 Причины:
 
@@ -404,8 +409,11 @@ API отвечает `202` только после commit записи `notifica
 - `id`;
 - `source_system`;
 - `idempotency_key`;
+- `request_hash` для проверки повторного ключа с другим телом;
 - `user_id`;
 - `type` и `priority`;
+- `template_id`, `locale`;
+- зашифрованный `payload` либо `payload_ref` на durable-хранилище;
 - `state` и `version`;
 - `route_plan`;
 - `next_action_at`;
@@ -427,7 +435,7 @@ Unique constraints:
 
 - `(source_system, idempotency_key)`;
 - `(notification_id, channel, attempt_no)`;
-- `provider_message_id`, если он задан.
+- `(provider, provider_message_id)`, если ID задан.
 
 ### 12.3. Outbox и Inbox
 
@@ -521,8 +529,10 @@ Alerts:
 - mTLS между внутренними сервисами;
 - OAuth2 service credentials для API;
 - TLS до провайдеров;
+- HMAC/подпись callbacks провайдеров с проверкой timestamp/nonce против replay;
+- app acknowledgement принимается только от авторизованного пользователя и сверяется с `user_id` уведомления;
 - encryption at rest для БД, broker и архива;
-- контакты и payload доступны только channel worker на время отправки;
+- payload расшифровывается только Orchestrator/Template Service, а контакты — только channel worker непосредственно перед отправкой;
 - credentials провайдеров хранятся в Vault;
 - RBAC на status/audit API;
 - технические логи не содержат полный текст, телефон или email.

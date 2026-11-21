@@ -15,10 +15,11 @@ participant "Мобильное приложение" as App
 participant "Callback Gateway" as Callback
 
 Source -> API: POST notification + idempotency_key
-API -> Registry: INSERT unique(source, key, notification_id)
+API -> Registry: INSERT/GET unique key, status=PENDING
 API -> Temporal: StartWorkflow(workflowId = notification_id)
 Temporal -> Temporal: durable save WorkflowExecutionStarted
 Temporal --> API: workflow accepted
+API -> Registry: status=STARTED
 API --> Source: 202 Accepted + notification_id
 
 Temporal -> Workflow: workflow task
@@ -32,7 +33,7 @@ Provider --> Push: accepted + provider_message_id
 Push --> Workflow: provider accepted
 Workflow -> Temporal: start durable timer 3 сек, await signal
 Provider -> App: push
-App -> Callback: app acknowledgement
+App -> Callback: authenticated app acknowledgement
 Callback -> Temporal: SignalWorkflow(PUSH_DELIVERED)
 Temporal -> Workflow: signal event
 Workflow -> Temporal: CompleteWorkflow(DELIVERED via PUSH)
@@ -45,6 +46,11 @@ API --> Source: DELIVERED via PUSH
 note over API,Temporal
 Workflow history и timer сохраняются durable.
 После рестарта новый worker продолжит процесс.
+end note
+
+note over API,Registry
+PENDING-записи запускает reconciler.
+Повтор использует тот же workflowId.
 end note
 
 note over Workflow,Push

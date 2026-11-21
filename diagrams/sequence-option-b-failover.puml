@@ -6,6 +6,7 @@ participant "Temporal Cluster" as Temporal
 participant "Delivery Workflow Worker" as Workflow
 participant "Push Activity" as Push
 participant "Push Provider" as PushProvider
+participant "Мобильное приложение" as App
 participant "SMS Activity" as SMS
 participant "SMS Provider" as SmsProvider
 participant "Callback Gateway" as Callback
@@ -15,6 +16,7 @@ Temporal -> Workflow: workflow task
 Workflow -> Push: ExecuteActivity sendPush(attempt PUSH#1)
 Push -> PushProvider: send(idempotency_key)
 PushProvider --> Push: accepted, app ack отсутствует
+PushProvider -> App: push может прийти с задержкой
 Push --> Workflow: PROVIDER_ACCEPTED
 Workflow -> Temporal: durable timer 3 сек + await PUSH_DELIVERED signal
 
@@ -25,14 +27,14 @@ SmsProvider --> SMS: accepted + message_id
 SMS --> Workflow: PROVIDER_ACCEPTED
 Workflow -> Temporal: durable timer 30 сек + await SMS_DLR signal
 
-SmsProvider -> Callback: DLR = DELIVERED
+SmsProvider -> Callback: signed DLR = DELIVERED
 Callback -> Temporal: SignalWorkflow(SMS_DELIVERED)
 Temporal -> Workflow: signal event
 Workflow -> Audit: Activity append business audit
 Workflow -> Temporal: CompleteWorkflow(DELIVERED via SMS)
 
 ... позднее ...
-PushProvider -> Callback: поздний push callback
+App -> Callback: authenticated late push acknowledgement
 Callback -> Temporal: SignalWorkflow(PUSH_DELIVERED_LATE)
 Temporal --> Callback: workflow уже completed
 Callback -> Audit: сохранить late callback отдельно

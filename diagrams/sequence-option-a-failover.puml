@@ -9,6 +9,7 @@ participant "Outbox Relay" as Relay
 participant "Timeout Scheduler" as Scheduler
 participant "Push Worker" as PushWorker
 participant "Push Provider" as PushProvider
+participant "Мобильное приложение" as App
 participant "SMS Worker" as SmsWorker
 participant "SMS Provider" as SmsProvider
 participant "Callback Gateway" as Callback
@@ -17,12 +18,16 @@ Kafka -> PushWorker: PushCommand
 PushWorker -> DB: dedup + attempt PUSH#1
 PushWorker -> PushProvider: send(notification_id, idempotency_key)
 PushProvider --> PushWorker: accepted, но app ack не приходит
-PushWorker -> Kafka: PushAccepted
+PushProvider -> App: push может прийти с задержкой
+PushWorker -> DB: attempt ACCEPTED + Outbox PushAccepted
+Relay -> DB: читает committed Outbox
+Relay -> Kafka: PushAccepted
 Kafka -> Orchestrator: PushAccepted
 Orchestrator -> DB: PUSH_WAITING_ACK, next_action_at = +3 сек
 
-Scheduler -> DB: SELECT due FOR UPDATE SKIP LOCKED
-Scheduler -> Kafka: PushAckTimeout
+Scheduler -> DB: SELECT due + INSERT Outbox PushAckTimeout
+Relay -> DB: читает committed Outbox
+Relay -> Kafka: PushAckTimeout
 Kafka -> Orchestrator: PushAckTimeout
 Orchestrator -> DB: lock + version check, status всё ещё WAITING_ACK
 Orchestrator -> DB: PUSH_WAITING_ACK -> SMS_IN_PROGRESS + Outbox SMSCommand
@@ -33,8 +38,10 @@ Kafka -> SmsWorker: SMSCommand
 SmsWorker -> DB: dedup + unique attempt SMS#1
 SmsWorker -> SmsProvider: send(notification_id, phone, text)
 SmsProvider --> SmsWorker: accepted + provider_message_id
-SmsWorker -> Kafka: SmsAccepted
-SmsProvider -> Callback: delivery receipt = DELIVERED
+SmsWorker -> DB: attempt ACCEPTED + Outbox SmsAccepted
+Relay -> DB: читает committed Outbox
+Relay -> Kafka: SmsAccepted
+SmsProvider -> Callback: signed delivery receipt = DELIVERED
 Callback -> DB: callback + outbox
 Relay -> DB: читает committed Outbox
 Relay -> Kafka: SmsDelivered
@@ -42,7 +49,7 @@ Kafka -> Orchestrator: SmsDelivered
 Orchestrator -> DB: conditional update -> DELIVERED via SMS
 
 ... позднее ...
-PushProvider -> Callback: поздний push acknowledgement
+App -> Callback: authenticated late push acknowledgement
 Callback -> DB: late callback + outbox
 Relay -> DB: читает committed Outbox
 Relay -> Kafka: PushDeliveredLate

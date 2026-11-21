@@ -1,5 +1,5 @@
 @startuml
-!includeurl https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+!includeurl https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/f998c46833daac592f3283ff08d7b8cd7e1558fb/C4_Container.puml
 
 title Вариант B — durable workflow на Temporal
 LAYOUT_LEFT_RIGHT()
@@ -12,20 +12,20 @@ System_Ext(emailProvider, "Email Provider", "Email доставка")
 System_Ext(mobile, "Мобильное приложение", "App acknowledgement")
 
 System_Boundary(platform, "Notification Platform") {
-  Container(api, "Notification API", "Java, Spring Boot", "Проверяет запрос и запускает workflow")
-  ContainerDb(registry, "Idempotency Registry", "PostgreSQL", "Связывает source key с notification/workflow ID")
+  Container(api, "Notification API", "Java, Spring Boot", "Проверяет запрос, запускает и восстанавливает workflow")
+  ContainerDb(registry, "Idempotency Registry", "PostgreSQL", "Source key, workflow ID и PENDING/STARTED")
   Container(temporal, "Temporal Cluster", "Temporal Server", "Durable workflows, timers, signals, retries и task queues")
   ContainerDb(temporalDb, "Temporal Persistence", "PostgreSQL", "Workflow history и durable timers")
   Container(visibility, "Workflow Visibility", "OpenSearch", "Поиск workflow и operational UI")
   Container(workers, "Delivery Workflow Workers", "Java + Temporal SDK", "Workflow-код и Activities push/SMS/email")
   Container(preferences, "Preference Adapter", "Java + Redis Cluster", "Контакты и настройки")
   Container(templates, "Template Service", "Java, Spring Boot", "Рендер сообщений")
-  Container(callback, "Callback Gateway", "Java, Spring Boot", "Преобразует callbacks в Temporal Signals")
+  Container(callback, "Callback Gateway", "Java, Spring Boot", "Проверяет подпись/session и преобразует callbacks в Signals")
   Container(audit, "Audit / Analytics", "ClickHouse + S3", "Бизнес-аудит, метрики и архив")
 }
 
 Rel(source, api, "Создаёт уведомление / читает статус", "HTTPS/JSON")
-Rel(api, registry, "Проверяет idempotency key", "JDBC")
+Rel(api, registry, "Создаёт/читает key и меняет PENDING/STARTED", "JDBC")
 Rel(api, temporal, "StartWorkflow / QueryWorkflow", "gRPC")
 Rel(temporal, temporalDb, "Хранит history и timers")
 Rel(temporal, visibility, "Индексирует workflow")

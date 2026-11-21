@@ -40,7 +40,7 @@ Provider --> Worker: accepted + provider_message_id
 Worker -> DB: attempt = PROVIDER_ACCEPTED + outbox
 CDC -> Kafka: PushAccepted
 Provider -> App: push
-App -> Callback: app acknowledgement(notification_id)
+App -> Callback: authenticated app acknowledgement(notification_id)
 Callback -> DB: сохранить callback + outbox
 CDC -> Kafka: DeliveryConfirmed
 Kafka -> Orchestrator: DeliveryConfirmed
