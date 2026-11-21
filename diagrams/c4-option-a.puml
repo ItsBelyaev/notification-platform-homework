@@ -1,0 +1,56 @@
+@startuml
+!includeurl https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Вариант A — Kafka и собственный Delivery Orchestrator
+LAYOUT_LEFT_RIGHT()
+
+System_Ext(source, "Банковские системы", "Переводы, платежи, продукты и кампании")
+System_Ext(profile, "Profile / Preference System", "Контакты, язык и настройки пользователя")
+System_Ext(pushProvider, "Push Provider", "APNs / FCM")
+System_Ext(smsProvider, "SMS Provider", "Основной и резервный провайдер")
+System_Ext(emailProvider, "Email Provider", "Основной и резервный провайдер")
+System_Ext(mobile, "Мобильное приложение", "Показывает push и отправляет acknowledgement")
+
+System_Boundary(platform, "Notification Platform") {
+  Container(api, "Notification API", "Java, Spring Boot", "Принимает запросы, проверяет idempotency key и возвращает notification ID")
+  ContainerDb(stateDb, "Delivery State DB", "PostgreSQL", "Состояния, attempts, Inbox и Transactional Outbox")
+  Container(outbox, "Outbox Relay", "Debezium / Kafka Connect", "Публикует committed Outbox-события")
+  Container(broker, "Event Broker", "Kafka", "Critical/service/bulk topics, delivery commands и results")
+  Container(orchestrator, "Delivery Orchestrator", "Java, Spring Boot", "Строит маршрут и управляет конечным автоматом и failover")
+  Container(scheduler, "Timeout / Reconciliation", "Java, Spring Boot", "Создаёт timeout-события и восстанавливает зависшие уведомления")
+  Container(preferences, "Preference Adapter", "Java + Redis Cluster", "Кеширует контакты, согласия и предпочтения")
+  Container(templates, "Template Service", "Java, Spring Boot", "Версии шаблонов, локализация и рендер")
+  Container(pushWorker, "Push Worker", "Java, Spring Boot", "Идемпотентно вызывает push provider")
+  Container(smsWorker, "SMS Worker", "Java, Spring Boot", "Идемпотентно вызывает SMS provider")
+  Container(emailWorker, "Email Worker", "Java, Spring Boot", "Идемпотентно вызывает email provider")
+  Container(callback, "Callback Gateway", "Java, Spring Boot", "Принимает app ack и provider callbacks")
+  Container(audit, "Audit / Analytics", "ClickHouse + S3", "Поиск истории, метрики стоимости и долгий архив")
+}
+
+Rel(source, api, "Создаёт и проверяет уведомления", "HTTPS/JSON")
+Rel(api, stateDb, "Транзакционно пишет notification + outbox", "JDBC")
+Rel(outbox, stateDb, "Читает committed WAL", "CDC")
+Rel(outbox, broker, "Публикует события", "Kafka protocol")
+Rel(orchestrator, broker, "Получает events и публикует commands", "Kafka protocol")
+Rel(orchestrator, stateDb, "Читает и меняет versioned state + outbox", "JDBC")
+Rel(orchestrator, preferences, "Получает route preferences")
+Rel(preferences, profile, "Читает источник истины", "HTTPS")
+Rel(orchestrator, templates, "Рендерит сообщение", "gRPC")
+Rel(scheduler, stateDb, "Ищет due/stuck records", "JDBC")
+Rel(scheduler, broker, "Публикует timeout/recovery events", "Kafka protocol")
+Rel(pushWorker, broker, "Получает push commands, публикует results")
+Rel(smsWorker, broker, "Получает SMS commands, публикует results")
+Rel(emailWorker, broker, "Получает email commands, публикует results")
+Rel(pushWorker, pushProvider, "Отправляет", "HTTPS")
+Rel(smsWorker, smsProvider, "Отправляет", "HTTPS")
+Rel(emailWorker, emailProvider, "Отправляет", "HTTPS")
+Rel(pushProvider, mobile, "Доставляет push")
+Rel(mobile, callback, "App acknowledgement", "HTTPS")
+Rel(pushProvider, callback, "Provider callback", "HTTPS")
+Rel(smsProvider, callback, "Delivery receipt", "HTTPS")
+Rel(emailProvider, callback, "Delivered callback", "HTTPS")
+Rel(callback, broker, "Публикует delivery results", "Kafka protocol")
+Rel(broker, audit, "Экспортирует delivery events")
+
+SHOW_LEGEND()
+@enduml

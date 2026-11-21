@@ -1,0 +1,54 @@
+@startuml
+title Вариант B — основной сценарий Temporal Workflow
+autonumber
+
+actor "Банковский сервис" as Source
+participant "Notification API" as API
+database "Idempotency Registry" as Registry
+participant "Temporal Cluster" as Temporal
+participant "Delivery Workflow Worker" as Workflow
+participant "Preference Activity" as Pref
+participant "Template Activity" as Template
+participant "Push Activity" as Push
+participant "Push Provider" as Provider
+participant "Мобильное приложение" as App
+participant "Callback Gateway" as Callback
+
+Source -> API: POST notification + idempotency_key
+API -> Registry: INSERT unique(source, key, notification_id)
+API -> Temporal: StartWorkflow(workflowId = notification_id)
+Temporal -> Temporal: durable save WorkflowExecutionStarted
+Temporal --> API: workflow accepted
+API --> Source: 202 Accepted + notification_id
+
+Temporal -> Workflow: workflow task
+Workflow -> Pref: Activity getPreferences(user_id)
+Pref --> Workflow: push token + route
+Workflow -> Template: Activity render(template, locale)
+Template --> Workflow: push content
+Workflow -> Push: Activity sendPush(attempt_id, content)
+Push -> Provider: send(idempotency_key)
+Provider --> Push: accepted + provider_message_id
+Push --> Workflow: provider accepted
+Workflow -> Temporal: start durable timer 3 сек, await signal
+Provider -> App: push
+App -> Callback: app acknowledgement
+Callback -> Temporal: SignalWorkflow(PUSH_DELIVERED)
+Temporal -> Workflow: signal event
+Workflow -> Temporal: CompleteWorkflow(DELIVERED via PUSH)
+
+Source -> API: GET /notifications/{id}
+API -> Temporal: QueryWorkflow
+Temporal --> API: DELIVERED
+API --> Source: DELIVERED via PUSH
+
+note over API,Temporal
+Workflow history и timer сохраняются durable.
+После рестарта новый worker продолжит процесс.
+end note
+
+note over Workflow,Push
+Activity retry встроен, но сама Activity
+всё равно использует idempotency key.
+end note
+@enduml

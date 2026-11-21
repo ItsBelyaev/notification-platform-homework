@@ -1,0 +1,61 @@
+@startuml
+title Вариант A — failover push → SMS и поздний callback
+autonumber
+
+queue "Kafka" as Kafka
+participant "Delivery Orchestrator" as Orchestrator
+database "PostgreSQL" as DB
+participant "Outbox Relay" as Relay
+participant "Timeout Scheduler" as Scheduler
+participant "Push Worker" as PushWorker
+participant "Push Provider" as PushProvider
+participant "SMS Worker" as SmsWorker
+participant "SMS Provider" as SmsProvider
+participant "Callback Gateway" as Callback
+
+Kafka -> PushWorker: PushCommand
+PushWorker -> DB: dedup + attempt PUSH#1
+PushWorker -> PushProvider: send(notification_id, idempotency_key)
+PushProvider --> PushWorker: accepted, но app ack не приходит
+PushWorker -> Kafka: PushAccepted
+Kafka -> Orchestrator: PushAccepted
+Orchestrator -> DB: PUSH_WAITING_ACK, next_action_at = +3 сек
+
+Scheduler -> DB: SELECT due FOR UPDATE SKIP LOCKED
+Scheduler -> Kafka: PushAckTimeout
+Kafka -> Orchestrator: PushAckTimeout
+Orchestrator -> DB: lock + version check, status всё ещё WAITING_ACK
+Orchestrator -> DB: PUSH_WAITING_ACK -> SMS_IN_PROGRESS + Outbox SMSCommand
+Relay -> DB: читает committed Outbox
+Relay -> Kafka: SMSCommand
+
+Kafka -> SmsWorker: SMSCommand
+SmsWorker -> DB: dedup + unique attempt SMS#1
+SmsWorker -> SmsProvider: send(notification_id, phone, text)
+SmsProvider --> SmsWorker: accepted + provider_message_id
+SmsWorker -> Kafka: SmsAccepted
+SmsProvider -> Callback: delivery receipt = DELIVERED
+Callback -> DB: callback + outbox
+Relay -> DB: читает committed Outbox
+Relay -> Kafka: SmsDelivered
+Kafka -> Orchestrator: SmsDelivered
+Orchestrator -> DB: conditional update -> DELIVERED via SMS
+
+... позднее ...
+PushProvider -> Callback: поздний push acknowledgement
+Callback -> DB: late callback + outbox
+Relay -> DB: читает committed Outbox
+Relay -> Kafka: PushDeliveredLate
+Kafka -> Orchestrator: PushDeliveredLate
+Orchestrator -> DB: state уже DELIVERED, только записать audit
+
+note over Scheduler,Orchestrator
+Timeout и callback могут прийти одновременно.
+Version/state check разрешает только один переход.
+end note
+
+note over PushProvider,SmsProvider
+Поздний push после SMS полностью исключить нельзя.
+Он измеряется как suspected duplicate.
+end note
+@enduml

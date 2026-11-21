@@ -1,0 +1,49 @@
+@startuml
+title Вариант B — failover в Temporal Workflow
+autonumber
+
+participant "Temporal Cluster" as Temporal
+participant "Delivery Workflow Worker" as Workflow
+participant "Push Activity" as Push
+participant "Push Provider" as PushProvider
+participant "SMS Activity" as SMS
+participant "SMS Provider" as SmsProvider
+participant "Callback Gateway" as Callback
+participant "Audit Activity" as Audit
+
+Temporal -> Workflow: workflow task
+Workflow -> Push: ExecuteActivity sendPush(attempt PUSH#1)
+Push -> PushProvider: send(idempotency_key)
+PushProvider --> Push: accepted, app ack отсутствует
+Push --> Workflow: PROVIDER_ACCEPTED
+Workflow -> Temporal: durable timer 3 сек + await PUSH_DELIVERED signal
+
+Temporal -> Workflow: timer fired
+Workflow -> SMS: ExecuteActivity sendSms(attempt SMS#1)
+SMS -> SmsProvider: send(idempotency_key)
+SmsProvider --> SMS: accepted + message_id
+SMS --> Workflow: PROVIDER_ACCEPTED
+Workflow -> Temporal: durable timer 30 сек + await SMS_DLR signal
+
+SmsProvider -> Callback: DLR = DELIVERED
+Callback -> Temporal: SignalWorkflow(SMS_DELIVERED)
+Temporal -> Workflow: signal event
+Workflow -> Audit: Activity append business audit
+Workflow -> Temporal: CompleteWorkflow(DELIVERED via SMS)
+
+... позднее ...
+PushProvider -> Callback: поздний push callback
+Callback -> Temporal: SignalWorkflow(PUSH_DELIVERED_LATE)
+Temporal --> Callback: workflow уже completed
+Callback -> Audit: сохранить late callback отдельно
+
+note over Temporal,Workflow
+Timer, signal и workflow state хранятся в history.
+Retry Policy применяется только к временным ошибкам Activity.
+end note
+
+note over Workflow,SMS
+Workflow-код выглядит последовательно,
+но Activities обязаны быть идемпотентными.
+end note
+@enduml

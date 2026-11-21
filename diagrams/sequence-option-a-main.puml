@@ -1,0 +1,62 @@
+@startuml
+title Вариант A — основной сценарий доставки через push
+autonumber
+
+actor "Банковский сервис" as Source
+participant "Notification API" as API
+database "PostgreSQL" as DB
+participant "Debezium" as CDC
+queue "Kafka" as Kafka
+participant "Delivery Orchestrator" as Orchestrator
+participant "Preference Adapter" as Pref
+participant "Template Service" as Template
+participant "Push Worker" as Worker
+participant "Push Provider" as Provider
+participant "Мобильное приложение" as App
+participant "Callback Gateway" as Callback
+
+Source -> API: POST notification + idempotency_key
+API -> DB: BEGIN
+API -> DB: INSERT notification(ACCEPTED)
+API -> DB: INSERT outbox(NotificationAccepted)
+API -> DB: COMMIT
+API --> Source: 202 Accepted + notification_id
+
+CDC -> DB: читает committed WAL
+CDC -> Kafka: NotificationAccepted
+Kafka -> Orchestrator: событие (at-least-once)
+Orchestrator -> DB: Inbox dedup + lock/version check
+Orchestrator -> Pref: настройки и валидные контакты
+Pref --> Orchestrator: push разрешён, token актуален
+Orchestrator -> Template: render(template, locale, payload)
+Template --> Orchestrator: push content
+Orchestrator -> DB: PLANNED -> PUSH_IN_PROGRESS + Outbox PushCommand
+CDC -> Kafka: PushCommand
+
+Kafka -> Worker: PushCommand
+Worker -> DB: Inbox dedup + INSERT unique attempt
+Worker -> Provider: send(idempotency_key, token, content)
+Provider --> Worker: accepted + provider_message_id
+Worker -> DB: attempt = PROVIDER_ACCEPTED + outbox
+CDC -> Kafka: PushAccepted
+Provider -> App: push
+App -> Callback: app acknowledgement(notification_id)
+Callback -> DB: сохранить callback + outbox
+CDC -> Kafka: DeliveryConfirmed
+Kafka -> Orchestrator: DeliveryConfirmed
+Orchestrator -> DB: conditional update -> DELIVERED
+
+Source -> API: GET /notifications/{id}
+API -> DB: read status
+API --> Source: DELIVERED via PUSH
+
+note over API,DB
+Ответ 202 даётся только после commit.
+Повтор idempotency_key возвращает тот же ID.
+end note
+
+note over Worker,Orchestrator
+Inbox, unique attempt и versioned transition
+делают повтор Kafka-события безопасным.
+end note
+@enduml
